@@ -15,7 +15,7 @@ import pandas as pd
 from nba_api.stats.endpoints import leaguegamelog, scoreboardv2
 from nba_api.stats.static import teams
 from sklearn.linear_model import Ridge
-from sklearn.metrics import mean_absolute_error
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.pipeline import make_pipeline
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler
@@ -107,15 +107,27 @@ def fit_models(df):
         model = make_pipeline(SimpleImputer(strategy="median"),
                               StandardScaler(), Ridge(alpha=100.))
         model.fit(tr[FEATURES], tr[target])
+        in_pred = np.clip(model.predict(tr[FEATURES]), 0, None)
         pred = np.clip(model.predict(te[FEATURES]), 0, None)
+        in_base = tr[target + "_avg5"].fillna(tr[target].mean()).clip(lower=0)
         base = te[target + "_avg5"].fillna(tr[target].mean()).clip(lower=0)
         err = te[target].to_numpy() - pred
         residual_sds[alias] = max(float(np.std(err, ddof=1)), .2)
+        def scores(actual, estimates, baseline):
+            return {
+                "n": int(len(actual)),
+                "mae": round(float(mean_absolute_error(actual, estimates)), 3),
+                "rmse": round(float(np.sqrt(mean_squared_error(actual, estimates))), 3),
+                "bias": round(float(np.mean(estimates - np.asarray(actual))), 3),
+                "r2": round(float(r2_score(actual, estimates)), 3),
+                "baseline_mae": round(float(mean_absolute_error(actual, baseline)), 3),
+            }
         diagnostics[alias] = {
-            "n_test": int(len(te)),
-            "mae": round(float(mean_absolute_error(te[target], pred)), 2),
-            "baseline_mae": round(float(mean_absolute_error(te[target], base)), 2),
-            "residual_sd": round(residual_sds[alias], 2)
+            "in_sample": scores(tr[target], in_pred, in_base),
+            "out_of_sample": scores(te[target], pred, base),
+            "residual_sd": round(residual_sds[alias], 3),
+            "train_through": str(pd.Timestamp(tr.GAME_DATE.max()).date()),
+            "test_from": str(pd.Timestamp(te.GAME_DATE.min()).date()),
         }
         # Refit only on data available before the day of prediction.
         full = trainable.dropna(subset=[target])
@@ -174,7 +186,7 @@ def forecast():
                     **estimates
                 })
     OUT.parent.mkdir(exist_ok=True)
-    summary = "; ".join(f"{k.upper()} validation MAE {v['mae']} (last-5 baseline {v['baseline_mae']}); n={v['n_test']}"
+    summary = "; ".join(f"{k.upper()} in-sample MAE {v['in_sample']['mae']}, out-of-sample MAE {v['out_of_sample']['mae']} (baseline {v['out_of_sample']['baseline_mae']})"
                         for k, v in diagnostics.items())
     payload = {"metadata": {
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
